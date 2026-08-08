@@ -46,22 +46,70 @@ pub fn focused_window() -> Result<WindowInfo, String> {
     Ok(info)
 }
 
-/// 返回"真正要展示快捷键的目标窗口"：排除 keytip 自身。
+/// 返回"真正要展示快捷键的目标窗口"：排除 keytip 自身，且只在**当前焦点
+/// workspace** 内寻找。
 ///
-/// - 若当前焦点窗口不是 keytip，直接返回它（正常情况）；
-/// - 若焦点是 keytip（被 `spawn` 后立即聚焦，或它就是唯一窗口），从窗口列表里
-///   找**最前**的非 keytip 窗口——修复"刚唤起时焦点瞬间落在 keytip 上，
-///   导致按 app-id 查到的是 keytip 自身、浮层空空"的竞态；
-/// - 若没有任何非 keytip 窗口（空桌面 / 唯一窗口就是 keytip），返回 `None`
+/// 关键修复：keytip 由快捷键 `spawn` 唤起后通常会立即抢走焦点
+/// （niri `open-focused true`），于是 `focused-window` 返回的是 keytip 自身。
+/// 旧实现此时回退到 `list_windows().find(app_id != keytip)`——而 `list_windows()`
+/// 返回**所有 workspace 的全部窗口**，会命中别的 workspace 里还开着的程序（如 kitty），
+/// 导致"空桌面却显示 kitty 快捷键"。
+///
+/// 正确判断：
+/// - 焦点窗口存在且不是 keytip → 用它（正常情况）；
+/// - 焦点是 keytip，或焦点在背景（无窗口聚焦）→ 看 keytip 所在的**焦点 workspace**
+///   内是否有其它窗口：有则用该窗口；没有则视为空桌面，返回 `None`
 ///   ——调用方据此退化为展示 niri 自身快捷键。
 pub fn target_window() -> Option<WindowInfo> {
-    if let Ok(w) = focused_window() {
-        if w.app_id != "keytip" {
-            return Some(w);
+    let windows = list_windows().ok()?;
+    // focused-window 可能返回 keytip 自身，或（焦点在背景时）失败。
+    let focused = focused_window().ok();
+    let focused_ws = focused_workspace_id();
+    pick_target(focused.as_ref(), &windows, focused_ws)
+}
+
+/// 纯逻辑判定（便于单测）：给定焦点窗口、全部窗口、焦点 workspace id，选出目标窗口。
+///
+/// - `focused` 非 keytip → 直接返回它；
+/// - 否则在 `focused_ws` 这个 workspace 内找第一个非 keytip 窗口；
+/// - 找不到（含 `focused_ws` 无法确定且无焦点窗口）→ 返回 `None`（空桌面）。
+fn pick_target(
+    focused: Option<&WindowInfo>,
+    windows: &[WindowInfo],
+    focused_ws: Option<u32>,
+) -> Option<WindowInfo> {
+    if let Some(f) = focused {
+        if f.app_id != "keytip" {
+            return Some(f.clone());
         }
     }
-    let windows = list_windows().ok()?;
-    windows.into_iter().find(|w| w.app_id != "keytip")
+    // 焦点是 keytip 或焦点在背景：仅限当前 workspace。
+    windows
+        .iter()
+        .find(|w| w.app_id != "keytip" && w.workspace_id == focused_ws)
+        .cloned()
+}
+
+/// 返回当前"焦点 workspace"的 id（`niri msg -j workspaces` 中 `is_focused` 为
+/// 真的那个）。keytip 由快捷键 spawn 时，会被放到**唤起前所在的焦点 workspace**，
+/// 因此用此 id 即可判断"keytip 出现在哪个 workspace、该 workspace 是否为空"。
+fn focused_workspace_id() -> Option<u32> {
+    let out = Command::new("niri")
+        .args(["msg", "-j", "workspaces"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    if let serde_json::Value::Array(arr) = &v {
+        for ws in arr {
+            if ws.get("is_focused")?.as_bool()? {
+                return ws.get("id")?.as_u64().map(|x| x as u32);
+            }
+        }
+    }
+    None
 }
 
 /// 列出所有窗口（`niri msg -j windows`），用于按 app-id 反查窗口 id。
@@ -191,4 +239,51 @@ pub fn active_monitor_logical_size() -> Option<(f32, f32, f32)> {
         }
     }
     matched.or(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn win(id: u64, app_id: &str, ws: u32, focused: bool) -> WindowInfo {
+        WindowInfo {
+            id,
+            title: app_id.to_string(),
+            app_id: app_id.to_string(),
+            pid: id as u32,
+            workspace_id: Some(ws),
+            is_focused: focused,
+        }
+    }
+
+    #[test]
+    fn empty_workspace_does_not_pick_other_ws_window() {
+        // keytip 在 workspace 2（空），kitty 在 workspace 1（另一个 workspace 还开着）。
+        let windows = vec![
+            win(1, "kitty", 1, false),
+            win(2, "keytip", 2, true),
+        ];
+        // 情形 A：焦点就是 keytip（open-focused=true 抢焦点）
+        let r = pick_target(Some(&windows[1]), &windows, Some(2));
+        assert!(r.is_none(), "空 workspace 应回退 niri，而非误命中 kitty：{:?}", r);
+        // 情形 B：焦点在背景（focused-window 失败，focused=None），focused_ws=2
+        let r = pick_target(None, &windows, Some(2));
+        assert!(r.is_none(), "空 workspace 应回退 niri，而非误命中 kitty：{:?}", r);
+    }
+
+    #[test]
+    fn same_workspace_window_is_used() {
+        // keytip 被 spawn 到 kitty 所在的 workspace 1。
+        let windows = vec![win(1, "kitty", 1, true), win(2, "keytip", 1, false)];
+        let r = pick_target(Some(&windows[0]), &windows, Some(1));
+        assert_eq!(r.unwrap().app_id, "kitty");
+    }
+
+    #[test]
+    fn focused_non_keytip_window_used_directly() {
+        // 焦点就是普通程序（keytip 还没出现 / 未抢焦点）。
+        let windows = vec![win(1, "firefox", 3, true)];
+        let r = pick_target(Some(&windows[0]), &windows, Some(3));
+        assert_eq!(r.unwrap().app_id, "firefox");
+    }
 }
