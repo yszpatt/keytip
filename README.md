@@ -15,6 +15,7 @@ Wayland（niri）下的快捷键提示浮层工具。通过全局快捷键唤起
 - **收藏页 / 全集页**：可把常用快捷键加星收藏，用标签页在「收藏」与「全集」间切换。
 - **单实例 + toggle**：已显示时再按 `Super+/` 会关闭窗口（若被其它窗口盖住则改为提到最前）。
 - **中文支持**：内置注入系统中文字体（CJK），中文显示无方块；搜索框支持 fcitx5 中文输入法（见下方「中文输入（IME）」）。
+- **无窗口兜底**：空桌面（无焦点窗口）时自动改为展示 niri 合成器自身的快捷键，并实时解析 niri 配置文件（`~/.config/niri/config.kdl` 及其 `include` 引入的分文件）导入按键，无需手动维护。
 - **手动补充快捷键**：内置默认库 + 用户手动补充通道（`keytip add`）。
 - **Rust 实现**：单一二进制，无运行时依赖，常驻低开销。
 
@@ -175,6 +176,23 @@ egui-winit = { path = "vendor/egui-winit-0.29.1-patched" }
 光打补丁还不够：winit 仅在收到 text-input 的 `enter` 事件且当时 `ime_allowed()==true` 时调用 `text_input.enable()`（把输入路由到本窗口）。keytip 被 niri `spawn` 时立即聚焦，首帧 `enter` 早于 egui 把 `ime_allowed` 置真，导致 `enable()` 被永久跳过。
 
 `overlay.rs` 每帧常驻 `IMEAllowed(true)`，并在启动首帧主动制造一次「焦点离开→回到」循环（先聚焦背后的其它窗口触发 `leave`，再聚焦回 keytip 触发新 `enter`，此时 `ime_allowed` 已为真，`enable()` 执行，fcitx5 开始路由中文）。相关辅助函数在 `niri.rs`：`focus_window_by_id`、`first_other_window_id`（实时查询非自身窗口，避免复用启动时自身 id 导致循环卡死）。
+
+---
+
+## 无窗口时展示 niri 快捷键
+
+在空桌面（没有焦点窗口）按 `Super+/` 唤起时，由于"当前活动窗口"不存在，keytip 会自动改为展示 **niri 合成器自身的快捷键**：
+
+- **自动读取配置**：定位 niri 配置文件（默认 `~/.config/niri/config.kdl`，也兼容常见的 `dms/binds.kdl`、`binds.kdl` 拆分位置；可用环境变量 `KEYTIP_NIRI_CONFIG` 显式指定路径）。
+- **解析 `binds` 块**（零依赖，针对 niri 的 KDL 格式定制）：
+  - 正确跳过 `//` 行注释与 `/* */` 块注释（尊重字符串字面量内的 `//`）；
+  - 跟随 `include "...";`（niri 的引入指令，等价于 KDL 的 `import`）递归合并分文件；
+  - 处理绑定上的属性（`hotkey-overlay-title="..."`、`allow-when-locked=true`、`repeat=false` 等）与多参数动作（`spawn "a" "b" "c"`）；
+  - 支持嵌套和弦（`Mod+H { Mod+L { close; } }`）。
+- **分类与汉化**：按键按首个动作归类（启动程序 / 窗口 / 工作区 / 列与布局 / 截图 …），动作描述翻译成中文友好文本（如 `spawn "kitty"` → "启动 kitty"）。
+- **收藏可用**：niri 快捷键同样支持加星收藏（app-id 为 `niri`，写入 `~/.config/keytip/favorites.json`），跨重启保留。
+
+> 因为是"实时解析"，改完 niri 配置后无需任何额外步骤，下次在空桌面唤起 keytip 看到的就是最新按键。
 
 ---
 

@@ -7,6 +7,7 @@
 //!   4. 弹出 EGui 浮层展示，Esc/失焦关闭（M4）。
 
 mod fonts;
+mod importer_niri;
 mod ipc;
 mod niri;
 mod overlay;
@@ -99,51 +100,77 @@ fn main() -> eframe::Result<()> {
     match ipc::try_bind() {
         Some(listener) => {
             // ===== server：成为唯一实例，正常启动浮层 =====
-            // --- M2：通过 niri IPC 取当前焦点窗口（作为要展示快捷键的目标程序） ---
-            let window = match niri::focused_window() {
-                Ok(w) => w,
-                Err(e) => {
-                    eprintln!("[keytip] 获取焦点窗口失败：{e}");
-                    eprintln!("[keytip] 需在 niri 会话中运行，且 niri 已在执行。");
-                    std::process::exit(1);
+            // --- M2：确定要展示快捷键的目标窗口 ---
+            //   优先用"真正的目标窗口"（排除 keytip 自身）：
+            //   - 焦点不是 keytip => 直接用；
+            //   - 焦点是 keytip（被 spawn 立即聚焦 / 唯一窗口）=> 从窗口列表找最前的非 keytip 窗口；
+            //   - 没有任何非 keytip 窗口（空桌面）=> None => 退化为展示 niri 自身快捷键。
+            let target = niri::target_window();
+
+            // 统一结果元组：(resolved_app_id, 窗口标题, 条目, 收藏, 终端重探测 (pid, app_id))
+            let (resolved_app_id, window_title, entries, favorites, redetect): (
+                String,
+                String,
+                Vec<store::ShortcutEntry>,
+                std::collections::HashSet<String>,
+                Option<(u32, String)>,
+            ) = match target {
+                Some(window) => {
+                    // --- M3：按 app-id 查快捷键（默认库 + 用户配置合并）---
+                    // 若焦点是终端模拟器，通用地递归穿透其内部程序（含复用器 tmux/screen），
+                    // 生成一串候选 app-id（越具体越优先）。取第一个在 store 中存在的作为目标。
+                    let candidates = resolve_candidates(&window);
+                    let store = store::ShortcutStore::load_all();
+                    let resolved_app_id = candidates
+                        .iter()
+                        .find(|k| store.get(*k).is_some())
+                        .cloned()
+                        .unwrap_or_else(|| window.app_id.clone());
+                    eprintln!(
+                        "[keytip] 当前窗口 app_id={} 标题={} => 候选 {:?} => 命中 {}",
+                        window.app_id, window.title, candidates, resolved_app_id
+                    );
+                    let entries = store
+                        .get(&resolved_app_id)
+                        .map(|app| app.entries.clone())
+                        .unwrap_or_default();
+                    diag(&format!(
+                        "focus app_id={} title={} => candidates={:?} resolved={} | matched_entries={} (store apps: {})",
+                        window.app_id,
+                        window.title,
+                        candidates,
+                        resolved_app_id,
+                        entries.len(),
+                        store.apps.keys().cloned().collect::<Vec<_>>().join(",")
+                    ));
+
+                    // 加载当前 app 的收藏集合（来自 favorites.json），供浮层标记/过滤收藏页。
+                    let favorites: std::collections::HashSet<String> = store::load_favorites()
+                        .get(&resolved_app_id)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
+
+                    (resolved_app_id, window.title.clone(), entries, favorites, Some((window.pid, window.app_id.clone())))
+                }
+                None => {
+                    // 无目标窗口（空桌面）：实时解析 niri 配置文件，展示 niri 自身快捷键。
+                    eprintln!("[keytip] 无焦点窗口，展示 niri 配置快捷键");
+                    let entries = importer_niri::load_niri_shortcuts();
+                    diag(&format!(
+                        "no focused window => niri shortcuts (parsed from config): {} entries",
+                        entries.len()
+                    ));
+                    let favorites: std::collections::HashSet<String> = store::load_favorites()
+                        .get(importer_niri::NIRI_APP_ID)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
+                    (importer_niri::NIRI_APP_ID.to_string(), "niri 快捷键配置".to_string(), entries, favorites, None)
                 }
             };
-
-            // --- M3：按 app-id 查快捷键（默认库 + 用户配置合并）---
-            // 若焦点是终端模拟器，通用地递归穿透其内部程序（含复用器 tmux/screen），
-            // 生成一串候选 app-id（越具体越优先）。取第一个在 store 中存在的作为目标。
-            let candidates = resolve_candidates(&window);
-            let store = store::ShortcutStore::load_all();
-            let resolved_app_id = candidates
-                .iter()
-                .find(|k| store.get(*k).is_some())
-                .cloned()
-                .unwrap_or_else(|| window.app_id.clone());
-            eprintln!(
-                "[keytip] 当前窗口 app_id={} 标题={} => 候选 {:?} => 命中 {}",
-                window.app_id, window.title, candidates, resolved_app_id
-            );
-            let entries = store
-                .get(&resolved_app_id)
-                .map(|app| app.entries.clone())
-                .unwrap_or_default();
-            diag(&format!(
-                "focus app_id={} title={} => candidates={:?} resolved={} | matched_entries={} (store apps: {})",
-                window.app_id,
-                window.title,
-                candidates,
-                resolved_app_id,
-                entries.len(),
-                store.apps.keys().cloned().collect::<Vec<_>>().join(",")
-            ));
-
-            // 加载当前 app 的收藏集合（来自 favorites.json），供浮层标记/过滤收藏页。
-            let favorites: std::collections::HashSet<String> = store::load_favorites()
-                .get(&resolved_app_id)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
 
             // 关闭请求标志：供 IPC server 线程与 UI 线程通信。
             let close_flag = Arc::new(AtomicBool::new(false));
@@ -151,15 +178,17 @@ fn main() -> eframe::Result<()> {
             // --- M4：弹 EGui 浮层 ---
             let mut app = overlay::OverlayApp::new(
                 resolved_app_id.clone(),
-                window.title.clone(),
+                window_title.clone(),
                 entries,
                 favorites,
                 close_flag.clone(),
             );
             // 终端程序启用"延迟重探测"：窗口获得焦点后约 1.2s 再探测一次，
             // 解决"终端里打开文件后 nvim 等要等十几秒才识别"的问题。
-            if term::is_terminal(&window.app_id) {
-                app.enable_redetect(window.pid, &window.app_id);
+            if let Some((pid, app_id)) = redetect {
+                if term::is_terminal(&app_id) {
+                    app.enable_redetect(pid, &app_id);
+                }
             }
 
             // 窗口尺寸：宽 = 活动显示器逻辑宽度 / 4，高 = 逻辑高度 × 80%，竖窗口。
@@ -354,6 +383,10 @@ fn print_help() {
     println!();
     println!("单实例 / toggle：");
     println!("  已显示时再按 Super+/ 会关闭窗口（若被其他窗口盖住则改为提到最前）。");
+    println!();
+    println!("无窗口兜底：");
+    println!("  空桌面（无焦点窗口）唤起时，自动展示 niri 自身快捷键（实时解析");
+    println!("  ~/.config/niri/config.kdl 及其 include 的分文件），无需手动维护。");
     println!();
     println!("用户配置：~/.config/keytip/shortcuts.json");
     println!("内置默认库：~/.local/share/keytip/defaults/");

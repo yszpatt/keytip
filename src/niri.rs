@@ -46,6 +46,24 @@ pub fn focused_window() -> Result<WindowInfo, String> {
     Ok(info)
 }
 
+/// 返回"真正要展示快捷键的目标窗口"：排除 keytip 自身。
+///
+/// - 若当前焦点窗口不是 keytip，直接返回它（正常情况）；
+/// - 若焦点是 keytip（被 `spawn` 后立即聚焦，或它就是唯一窗口），从窗口列表里
+///   找**最前**的非 keytip 窗口——修复"刚唤起时焦点瞬间落在 keytip 上，
+///   导致按 app-id 查到的是 keytip 自身、浮层空空"的竞态；
+/// - 若没有任何非 keytip 窗口（空桌面 / 唯一窗口就是 keytip），返回 `None`
+///   ——调用方据此退化为展示 niri 自身快捷键。
+pub fn target_window() -> Option<WindowInfo> {
+    if let Ok(w) = focused_window() {
+        if w.app_id != "keytip" {
+            return Some(w);
+        }
+    }
+    let windows = list_windows().ok()?;
+    windows.into_iter().find(|w| w.app_id != "keytip")
+}
+
 /// 列出所有窗口（`niri msg -j windows`），用于按 app-id 反查窗口 id。
 fn list_windows() -> Result<Vec<WindowInfo>, String> {
     let out = Command::new("niri")
