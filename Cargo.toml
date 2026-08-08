@@ -33,6 +33,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 
+# 关键补丁：egui-winit 0.29.1 在 Linux 上会直接丢弃所有 IME 事件
+# （见 https://github.com/emilk/egui/issues/5008），导致 fcitx5 的中文提交
+# Event::Ime(Commit) 永远到不了 egui 的 TextEdit，表现为「英文能打、中文不行」。
+# 现代 winit(0.30+) + Wayland text-input-v3 已可正确处理，故用本地补丁版本，
+# 让其与非 Linux 平台一样正常处理 IME 事件。详见 vendor/egui-winit-0.29.1-patched。
+[patch.crates-io]
+egui-winit = { path = "vendor/egui-winit-0.29.1-patched" }
+
 [profile.release]
 opt-level = 3
 lto = true

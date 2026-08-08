@@ -74,8 +74,17 @@ pub fn focus_window_by_app_id(app_id: &str) -> Result<(), String> {
         .iter()
         .find(|w| w.app_id == app_id)
         .ok_or_else(|| format!("未找到 app-id={app_id} 的窗口"))?;
+    focus_window_by_id(target.id)
+}
+
+/// 按窗口 id 聚焦指定窗口（`niri msg action focus-window --id <id>`）。
+///
+/// 用于 IME 初始化时的"焦点离开→回到"循环：先把焦点移到 keytip 背后的窗口，
+/// 让 keytip 触发 text-input 的 `leave`，再聚焦回 keytip 触发新的 `enter`，
+/// 从而让 winit 在 `ime_allowed` 已为 true 时调用 `text_input.enable()`。
+pub fn focus_window_by_id(id: u64) -> Result<(), String> {
     let out = Command::new("niri")
-        .args(["msg", "action", "focus-window", "--id", &target.id.to_string()])
+        .args(["msg", "action", "focus-window", "--id", &id.to_string()])
         .output()
         .map_err(|e| format!("无法执行 focus-window：{e}"))?;
     if !out.status.success() {
@@ -85,6 +94,23 @@ pub fn focus_window_by_app_id(app_id: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// 返回「除 `self_app_id` 之外」某个可见窗口的 id（IME 循环中用于把焦点挪开，
+/// 让 keytip 触发 text-input 的 `leave`）。
+///
+/// 关键点：必须用**实时查询**的结果，不能复用启动时记录的 id——若 keytip 在
+/// 启动时已带焦点（niri `open-focused true`），`focused_window()` 返回的其实是
+/// keytip 自身，用它去"聚焦背后"等于没动，leave 永不触发，IME 循环卡死。
+///
+/// 若除 keytip 外没有其他窗口则返回 None（此时无法制造 leave，IME 可能不可用，
+/// 但英文输入不受影响）。
+pub fn first_other_window_id(self_app_id: &str) -> Option<u64> {
+    let windows = list_windows().ok()?;
+    windows
+        .iter()
+        .find(|w| w.app_id != self_app_id)
+        .map(|w| w.id)
 }
 
 /// 当前焦点窗口所在显示器的「逻辑尺寸 + 缩放系数」，用于计算 keytip 浮层窗口大小。
