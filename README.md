@@ -14,7 +14,7 @@ Wayland（niri）下的快捷键提示浮层工具。通过全局快捷键唤起
 - **浮层展示**：EGui 渲染，按上下文分组 + 搜索过滤，Esc / 失焦自动关闭；窗口外观为半透明深蓝工具窗。
 - **收藏页 / 全集页**：可把常用快捷键加星收藏，用标签页在「收藏」与「全集」间切换。
 - **单实例 + toggle**：已显示时再按 `Super+/` 会关闭窗口（若被其它窗口盖住则改为提到最前）。
-- **中文支持**：内置注入系统中文字体（CJK），中文不会变成方块 ▯。
+- **中文支持**：内置注入系统中文字体（CJK），中文显示无方块；搜索框支持 fcitx5 中文输入法（见下方「中文输入（IME）」）。
 - **手动补充快捷键**：内置默认库 + 用户手动补充通道（`keytip add`）。
 - **Rust 实现**：单一二进制，无运行时依赖，常驻低开销。
 
@@ -153,11 +153,37 @@ keytip add kitty:nvim "Space+w" "save" "保存" "文件"
 
 ---
 
+## 中文输入（IME）
+
+搜索框默认用 egui 的 `TextEdit`。在 Wayland + niri 下，**egui-winit 0.29.1 在 Linux 平台会直接丢弃所有 IME 事件**（[emilk/egui#5008](https://github.com/emilk/egui/issues/5008)），导致 fcitx5 提交的中文 `Event::Ime(Commit)` 永远到不了 `TextEdit`，表现为「英文能打、中文打不进」。
+
+### 修复方式（已 vendored）
+
+本仓库在 `vendor/egui-winit-0.29.1-patched/` 中保留了一份打了补丁的 egui-winit：去掉了 `WindowEvent::Ime` 处理器里 `if cfg!(target_os = "linux") { ignore }` 的守卫，让 Linux 与非 Linux 平台一样正常处理 Preedit / Commit。`Cargo.toml` 通过 `[patch.crates-io]` 指向它：
+
+```toml
+[patch.crates-io]
+egui-winit = { path = "vendor/egui-winit-0.29.1-patched" }
+```
+
+现代 winit 0.30 + Wayland text-input-v3 已可正确处理 CJK 输入，这样 `cargo build` 无需额外步骤即可获得中文输入能力。
+
+> ⚠️ **维护提示**：该补丁是对上游 egui-winit 的本地 fork。**若将来升级 `egui-winit` 版本，必须**对对应新版本重新 vendored 并重新应用同样的 Linux IME 守卫移除（否则中文输入会再次失效）。升级后可 `cargo build --release` 实测搜索框中文输入来验证。
+
+### 焦点初始化循环
+
+光打补丁还不够：winit 仅在收到 text-input 的 `enter` 事件且当时 `ime_allowed()==true` 时调用 `text_input.enable()`（把输入路由到本窗口）。keytip 被 niri `spawn` 时立即聚焦，首帧 `enter` 早于 egui 把 `ime_allowed` 置真，导致 `enable()` 被永久跳过。
+
+`overlay.rs` 每帧常驻 `IMEAllowed(true)`，并在启动首帧主动制造一次「焦点离开→回到」循环（先聚焦背后的其它窗口触发 `leave`，再聚焦回 keytip 触发新 `enter`，此时 `ime_allowed` 已为真，`enable()` 执行，fcitx5 开始路由中文）。相关辅助函数在 `niri.rs`：`focus_window_by_id`、`first_other_window_id`（实时查询非自身窗口，避免复用启动时自身 id 导致循环卡死）。
+
+---
+
 ## 已知限制 / 后续
 
 - **浮层置顶**：✅ 已解决 —— 在 window-rule 里补上 `open-focused true` 后，`open-floating` 随之生效，实测窗口 `floating=True`。原先设想的 layer-shell 重构不再必要（`examples/verify_layershell.rs` 保留作为备选方案验证）。
 - **半透明背景**：✅ 已实现（`with_transparent(true)` + App 全透明 + 半透明深蓝底板）。最终观感依赖合成器透明支持，niri 下正常。
 - **CJK 字体**：✅ 已实现（`fonts.rs` 注入系统中文字体，否则中文显示为方块）。
+- **中文输入（IME）**：✅ 已解决 —— 见上方「中文输入（IME）」：vendored egui-winit 补丁（去掉 Linux IME 丢弃守卫）+ 焦点初始化循环，搜索框 fcitx5 中文输入正常上屏。
 - **niri ×2 渲染怪癖**：见上方「窗口尺寸行为」。HDMI 等次屏若高度被 niri 物理上限钳到 65% 左右，属于该上限所致，非代码 bug。
 - **导入器**：首版预留 `Importer` 接口，仅框架 + 默认库；具体程序解析器（VS Code / 终端 / Firefox 配置）待后续增量。当前默认库仅含少量示例（`data/defaults/`）。
 
