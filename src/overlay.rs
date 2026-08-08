@@ -53,12 +53,6 @@ pub struct OverlayApp {
     /// 启动时刻，用于宽限期兜底（某些合成器可能始终不给焦点）。
     started: std::time::Instant,
 
-    // --- IME（中文输入法）初始化 ---
-    /// IME 初始化阶段：0=未开始，1=已令本窗口 leave（聚焦其他窗口），2=已完成（聚焦回本窗口）。
-    ime_init_stage: u8,
-    /// IME 初始化开始时刻，用于超时兜底（避免循环异常时窗口永远卡在初始化）。
-    ime_init_start: std::time::Instant,
-
     // --- 延迟重探测（优化"终端里开文件后 nvim 要等十几秒才识别"）---
     /// 探测用的终端进程 pid（非终端程序为 0，不做重探测）。
     detect_pid: u32,
@@ -99,8 +93,6 @@ impl OverlayApp {
             style_inited: false,
             key_col_w: 0.0,
             key_col_dirty: true,
-            ime_init_stage: 0,
-            ime_init_start: std::time::Instant::now(),
         };
         s.regroup(entries);
         s.app_id = app_id;
@@ -230,53 +222,21 @@ impl eframe::App for OverlayApp {
         //  `Event::Ime(Commit)` 永远到不了 egui 的 TextEdit → 表现为「英文能打、中文不行」。
         //  此问题已通过 vendor/egui-winit-0.29.1-patched（去掉该 linux 守卫）修复。
         //
-        //  此外还存在一个时序问题（winit 0.30.13 源码确认）：compositor 下发
-        //  text_input.enter 时，仅当 ime_allowed()==true 才调用 text_input.enable()
-        //  （通知 fcitx5 把输入路由到本窗口）；而 enable 只在 enter 时调用一次。
-        //  本窗口被 niri spawn 时立即聚焦 → enter 已随聚焦下发，但彼时 ime_allowed 尚为 false
-        //  （egui 首帧未跑）→ enable 被永久跳过。修复：
-        //    1) 每帧常驻 IMEAllowed(true) → ime_allowed 恒为真；
-        //    2) 首帧主动制造一次「焦点离开→回到」循环（先聚焦其他窗口触发 leave，
-        //       再聚焦回本窗口触发新 enter），使 enable 在 ime_allowed 已为真时执行
-        //       → fcitx5 即可路由中文。
-        const IME_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(3000);
-        let ime_initializing =
-            self.ime_init_stage < 2 && self.ime_init_start.elapsed() < IME_INIT_TIMEOUT;
-        // 当前视口焦点（IME 循环与自动关闭都要用，提前取一次）。
+        // 修复方式：每帧常驻 IMEAllowed(true)，使窗口级 IME 始终开启。一旦 compositor
+        // 把 keytip 聚焦（text-input enter），winit 在 ime_allowed==true 时就会调用
+        // text_input.enable()，fcitx5 随即把中文路由到本窗口——无需任何手动焦点切换。
+        //
+        // ⚠️ 历史上曾用「先聚焦其他窗口制造 leave、再聚焦回本窗口制造 enter」的循环来
+        // 补救 enable() 仅 enter 时调用一次的时序问题。但该循环会**主动偷走用户焦点**
+        // （唤起 keytip 后跳到别的窗口），体验不可接受，已移除。现在依赖上面 vendor 补丁
+        // + 每帧 IMEAllowed(true)：keytip 被正常聚焦的那一次 enter 即满足 enable 条件。
+        // 当前视口焦点（自动关闭判定要用，提前取一次）。
         let focused = ctx.input(|i| i.focused);
         if focused {
             self.ever_focused = true;
         }
-        // 常驻开启窗口 IME（不受搜索框焦点限制，确保每次 enter 都能 enable）。
+        // 常驻开启窗口 IME（不受搜索框焦点限制，确保 keytip 获得焦点时即可输入中文）。
         ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(true));
-        if ime_initializing {
-            match self.ime_init_stage {
-                0 => {
-                    // 阶段0：聚焦「其他」窗口（实时查询，绝不用启动时记录的 id——若 keytip
-                    // 启动时已带焦点，旧 id 就是自身，聚焦它等于没动，leave 永不触发），
-                    // 使本窗口失去焦点 → text_input leave（disable）。
-                    if let Some(other) = crate::niri::first_other_window_id("keytip") {
-                        let _ = crate::niri::focus_window_by_id(other);
-                        self.ime_init_stage = 1;
-                    } else {
-                        // 没有其他窗口可聚焦（极端情况），无法制造 leave → 跳过 IME 初始化。
-                        // 此时英文仍可用，仅中文不可用；不卡死循环。
-                        self.ime_init_stage = 2;
-                    }
-                }
-                1 => {
-                    // 阶段1：等本窗口真正失焦（leave 已生效）后，再聚焦回本窗口
-                    // → 触发新的 enter，此时 ime_allowed 已为 true → text_input.enable() 执行。
-                    if !focused {
-                        let _ = crate::niri::focus_window_by_app_id("keytip");
-                        self.ime_init_stage = 2;
-                    }
-                    // 否则再等一帧，等 leave 在合成器侧生效。
-                }
-                _ => {}
-            }
-            ctx.request_repaint();
-        }
 
         // 失焦自动关闭（瞬时浮层模式：被 niri spawn 唤起，操作完即退）
         // 设 KEYTIP_NO_AUTOCLOSE 可禁用（用于无头/远程验证）。
@@ -285,11 +245,10 @@ impl eframe::App for OverlayApp {
         // 窗口会一闪即退（实测现象：进程 exit 0 但窗口列表里看不到）。
         // 因此要求「先曾获得焦点，之后再失去」才关闭；并给一个宽限期兜底，
         // 避免合成器始终不给焦点时窗口永远关不掉。
-        // IME 初始化期间（焦点循环）临时抑制自动关闭，否则窗口会因短暂失焦被误杀。
         let autoclose = std::env::var_os("KEYTIP_NO_AUTOCLOSE").is_none();
         const FOCUS_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
         let past_grace = self.started.elapsed() > FOCUS_GRACE;
-        if autoclose && !focused && (self.ever_focused || past_grace) && !ime_initializing {
+        if autoclose && !focused && (self.ever_focused || past_grace) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
