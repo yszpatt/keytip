@@ -1,0 +1,6 @@
+[
+  { "context": "媒体", "keys": "Ctrl+Alt+Shift+S", "action": "toggle_fullscreen", "description": "切换全屏" },
+  { "context": "媒体", "keys": "Ctrl+Alt+Shift+Q", "action": "quit", "description": "退出会话" },
+  { "context": "媒体", "keys": "Ctrl+Alt+Shift+F1", "action": "mute", "description": "静音" },
+  { "context": "视图", "keys": "Ctrl+Alt+Shift+U", "action": "toggle_statistics", "description": "显示/隐藏状态信息" }
+]

@@ -1,0 +1,39 @@
+[package]
+name = "keytip"
+version = "0.1.0"
+edition = "2021"
+description = "Wayland 下的快捷键提示工具（niri 等合成器）"
+default-run = "keytip"
+
+[[bin]]
+name = "keytip"
+path = "src/main.rs"
+
+[dependencies]
+# Wayland 客户端基础
+wayland-client = "0.31"
+# wlr 协议扩展（foreign-toplevel-management 等）
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# xdg-shell 等基础协议
+wayland-protocols = { version = "0.32", features = ["client"] }
+# 全局快捷键 / portal（ashpd 封装 xdg-desktop-portal）
+ashpd = { version = "0.10", features = ["wayland", "backend"] }
+# 异步运行时（ashpd / wayland 事件循环需要）
+tokio = { version = "1", features = ["full"] }
+# 序列化（存储快捷键）
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 异步流（examples 用）
+futures = "0.3"
+# EGui 浮层
+eframe = "0.29"
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
