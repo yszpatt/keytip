@@ -410,8 +410,14 @@ fn first_action_name(node: &str) -> String {
 }
 
 /// 生成"顶层绑定节点"的友好描述：只描述块内的动作（按键组合本身已作为 `keys` 单独展示）。
-/// 对嵌套和弦（`Mod+H { Mod+L { close; } }`）会保留内部的 `→` 形式。
+///
+/// 优先级：
+/// 1. niri 自带的 `hotkey-overlay-title="..."`（人类可读标题，最贴近用户意图）；
+/// 2. 否则由动作推导（spawn 解析程序名/脚本意图、dms ipc 翻译成中文等）。
 fn describe_bind(node: &str) -> String {
+    if let Some(title) = overlay_title_of(node) {
+        return title;
+    }
     let t = node.trim();
     if let Some(idx) = t.find('{') {
         let inner = t[idx + 1..].trim_end_matches('}').trim();
@@ -461,6 +467,43 @@ fn describe_node(node: &str) -> String {
     } else {
         format!("{combo} → {inner_desc}")
     }
+}
+
+/// 取一个绑定节点上的 `hotkey-overlay-title="..."` 属性值（niri 自带的"人类可读标题"）。
+///
+/// niri 几乎每条 bind 都带这个属性（如 `hotkey-overlay-title="Open Terminal"`、
+/// `"WeChat"`、`"Power Menu: Toggle"`），它正是用户想要的"明确含义"，优先作为描述。
+fn overlay_title_of(node: &str) -> Option<String> {
+    let chars: Vec<char> = node.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        if matches_ident(&chars, i, "hotkey-overlay-title") {
+            let mut j = i + "hotkey-overlay-title".len();
+            while j < n && (chars[j].is_whitespace() || chars[j] == '=') {
+                j += 1;
+            }
+            if j < n && chars[j] == '"' {
+                let mut v = String::new();
+                j += 1;
+                while j < n && chars[j] != '"' {
+                    if chars[j] == '\\' && j + 1 < n {
+                        v.push(chars[j + 1]);
+                        j += 2;
+                    } else {
+                        v.push(chars[j]);
+                        j += 1;
+                    }
+                }
+                let t = v.trim().to_string();
+                if !t.is_empty() {
+                    return Some(t);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// 把单个动作节点文本拆成 (动作名, 参数列表)。`spawn "keytip";` → ("spawn", ["keytip"])。
@@ -517,17 +560,129 @@ fn tokenize(text: &str) -> Vec<String> {
     out
 }
 
+/// 已知 app-id / 命令名 → 中文显示名（用于 spawn 描述，避免露出裸命令或脚本路径）。
+fn app_alias(cmd: &str) -> Option<&'static str> {
+    let c = cmd.trim_matches('"');
+    let stem = std::path::Path::new(c)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(c);
+    let bare = c.trim_start_matches('~').trim_start_matches('/');
+    let _ = bare;
+    match stem {
+        "kitty" | "alacritty" | "wezterm" | "foot" => Some("终端"),
+        "zen-browser" | "zen" | "firefox" | "chrome" | "chromium" | "brave" => Some("浏览器"),
+        "feishu" => Some("飞书"),
+        "telegram" | "telegram-desktop" => Some("Telegram"),
+        "wechat" | "wechat-uos" => Some("微信"),
+        "code" | "code-oss" | "codium" => Some("VS Code"),
+        "nvim" | "vim" | "neovide" => Some("Neovim"),
+        "nautilus" | "thunar" | "dolphin" | "pcmanfm" => Some("文件管理器"),
+        "kando" => Some("Kando 径向菜单"),
+        "mark-shot" | "grim" | "satty" | "slurp" => Some("截图工具"),
+        "keytip" => Some("KeyTip 快捷键提示"),
+        _ => None,
+    }
+}
+
+/// 把 `spawn` 的参数翻译成有明确含义的中文描述。
+///
+/// - 形如 `dms ipc call <module> <action>` → 翻译模块/动作（如 powermenu toggle → 电源菜单；切换）；
+/// - 直接命令 → 用 app_alias 显示名（"启动 终端"），无别名时显示干净的程序名（去路径/.sh/引号）；
+/// - `sh -c "..."` → 尽量从命令里猜意图，猜不到则显示"运行脚本"。
+fn spawn_description(args: &[String]) -> String {
+    if let Some(a) = args.first() {
+        // dms ipc call <module> <action...>
+        if a == "dms" && args.len() >= 4 && args[1] == "ipc" && args[2] == "call" {
+            let module = &args[3];
+            let act = args.get(4).map(|s| s.as_str()).unwrap_or("");
+            let m = dms_module(module);
+            let verb = dms_action(act);
+            let mv = if verb.is_empty() {
+                m.to_string()
+            } else {
+                format!("{m}；{verb}")
+            };
+            return if mv.is_empty() { "DMS 控制".to_string() } else { mv };
+        }
+        if a == "sh" && args.get(1).map(|s| s.as_str()) == Some("-c") {
+            // 尽量从 shell 命令里提取可读意图（取第一个像样的令牌）。
+            if let Some(cmd) = args.get(2) {
+                let head = cmd.split_whitespace().next().unwrap_or("");
+                if let Some(alias) = app_alias(head) {
+                    return format!("运行：{alias}");
+                }
+                if !head.is_empty() {
+                    return format!("运行：{head}");
+                }
+            }
+            return "运行脚本".to_string();
+        }
+        if let Some(alias) = app_alias(a) {
+            return format!("启动 {alias}");
+        }
+        // 裸程序：去掉路径、~、.sh 后缀、引号，呈现干净的命令名。
+        let bare = a
+            .trim_matches('"')
+            .rsplit('/')
+            .next()
+            .unwrap_or(a)
+            .trim_start_matches('~')
+            .trim_start_matches('/');
+        let stem = bare.strip_suffix(".sh").unwrap_or(bare);
+        if stem.is_empty() {
+            "启动程序".to_string()
+        } else {
+            format!("启动 {stem}")
+        }
+    } else {
+        "启动程序".to_string()
+    }
+}
+
+/// dms IPC 模块名 → 中文。
+fn dms_module(m: &str) -> &'static str {
+    match m {
+        "spotlight" => "启动器",
+        "clipboard" => "剪贴板",
+        "processlist" => "进程列表",
+        "powermenu" => "电源菜单",
+        "settings" => "设置",
+        "dankdash" => "壁纸",
+        "notifications" => "通知中心",
+        "notepad" => "便签",
+        "lock" => "锁屏",
+        "audio" => "音量",
+        "mic" | "microphone" => "麦克风",
+        "mpris" => "媒体播放",
+        "brightness" => "亮度",
+        _ => "",
+    }
+}
+
+/// dms IPC 动作名 → 中文（toggle / focusOrToggle / increment / lock 等）。
+fn dms_action(a: &str) -> &'static str {
+    match a {
+        "toggle" => "切换",
+        "focusOrToggle" => "聚焦/切换",
+        "increment" => "增加",
+        "decrement" => "减少",
+        "mute" => "静音",
+        "micmute" => "麦克风静音",
+        "playPause" => "播放/暂停",
+        "previous" => "上一个",
+        "next" => "下一个",
+        "lock" => "锁定",
+        "wallpaper" => "切换壁纸",
+        _ => "",
+    }
+}
+
 /// 把 niri 动作翻译成中文友好描述。
 fn friendly_action(name: &str, args: &[String]) -> String {
     let arg = args.join(" ");
     match name {
-        "spawn" => {
-            if let Some(a) = args.first() {
-                format!("启动 {a}")
-            } else {
-                "启动程序".to_string()
-            }
-        }
+        "spawn" => spawn_description(args),
         "close" | "close-window" => "关闭窗口".to_string(),
         "quit" => "退出 niri".to_string(),
         "toggle-overview" => "切换总览".to_string(),
@@ -587,7 +742,18 @@ fn friendly_action(name: &str, args: &[String]) -> String {
         "screenshot-screen" => "截取屏幕".to_string(),
         "screenshot-window" => "截取窗口".to_string(),
         "toggle-fullscreen" => "切换全屏".to_string(),
-        "fullscreen" => "全屏".to_string(),
+        "fullscreen" | "fullscreen-window" => "全屏窗口".to_string(),
+        "reset-window-height" => "重置窗口高度".to_string(),
+        "set-window-height" => {
+            if let Some(a) = args.first() {
+                format!("设置窗口高度 {a}")
+            } else {
+                "设置窗口高度".to_string()
+            }
+        }
+        "toggle-keyboard-shortcuts-inhibit" => "禁止/允许键盘快捷键穿透".to_string(),
+        "next-window" => "切换到下一个窗口".to_string(),
+        "previous-window" => "切换到上一个窗口".to_string(),
         "toggle-window-floating" => "切换窗口浮动".to_string(),
         "set-window-floating" => "设为浮动窗口".to_string(),
         "maximize-column" => "最大化列".to_string(),
@@ -621,12 +787,20 @@ fn categorize(first_action: &str) -> &'static str {
         || first_action == "swap-windows"
         || first_action.starts_with("move-window-to-monitor")
         || first_action.starts_with("focus-monitor")
+        || first_action.starts_with("consume-or-expel-window")
+        || first_action == "next-window"
+        || first_action == "previous-window"
     {
         "窗口与显示器"
     } else if first_action.contains("column")
         || first_action.contains("layout")
         || first_action.starts_with("switch-layout")
         || first_action.starts_with("set-layout")
+        || first_action.contains("window-height")
+        || first_action == "reset-window-height"
+        || first_action == "maximize-column"
+        || first_action == "set-column-width"
+        || first_action == "toggle-column-tabbed-display"
     {
         "列与布局"
     } else if first_action == "toggle-overview" || first_action == "show-hotkey-overlay" {
@@ -639,8 +813,8 @@ fn categorize(first_action: &str) -> &'static str {
         "切换"
     } else if first_action.contains("fullscreen")
         || first_action.contains("floating")
-        || first_action == "maximize-column"
         || first_action.contains("always-on-top")
+        || first_action == "toggle-keyboard-shortcuts-inhibit"
     {
         "窗口状态"
     } else {
@@ -728,7 +902,7 @@ mod tests {
         assert_eq!(entries.len(), 6, "entries={:?}", entries);
 
         let kt = entries.iter().find(|e| e.keys == "Mod+Slash").unwrap();
-        assert_eq!(kt.description, "启动 keytip");
+        assert_eq!(kt.description, "启动 KeyTip 快捷键提示");
         assert_eq!(kt.context, "启动程序");
 
         let q = entries.iter().find(|e| e.keys == "Mod+Q").unwrap();
@@ -757,8 +931,9 @@ mod tests {
         assert_eq!(entries.len(), 2, "entries={:?}", entries);
 
         let slash = entries.iter().find(|e| e.keys == "Mod+/").unwrap();
+        // spawn 第一个参数是 URL 字符串：去掉引号、路径前缀后作为程序名展示（http:// 被 rsplit('/') 去掉）。
         assert!(
-            slash.description.contains("http://example.com"),
+            slash.description.contains("example.com"),
             "desc={}",
             slash.description
         );
@@ -770,6 +945,50 @@ mod tests {
         let cfg = r#"import "a.kdl"; include "dms/binds.kdl"; binds { Mod+Slash { spawn "keytip"; } }"#;
         let imports = find_imports(&strip_comments(cfg));
         assert_eq!(imports, vec!["a.kdl".to_string(), "dms/binds.kdl".to_string()]);
+    }
+
+    #[test]
+    fn prefers_hotkey_overlay_title_over_action() {
+        // niri 自带的 hotkey-overlay-title 应优先作为描述，而非裸露的 spawn 命令。
+        let cfg = r#"
+        binds {
+            Mod+B hotkey-overlay-title="Open a Zen" { spawn "zen-browser"; }
+            Mod+D hotkey-overlay-title="WeChat" { spawn "~/.config/niri/scripts/toggle-wechat.sh"; }
+            Super+X hotkey-overlay-title="Power Menu: Toggle" { spawn "dms" "ipc" "call" "powermenu" "toggle"; }
+        }
+        "#;
+        let entries = parse_sample(cfg);
+        assert_eq!(entries.len(), 3, "entries={:?}", entries);
+        let b = entries.iter().find(|e| e.keys == "Mod+B").unwrap();
+        assert_eq!(b.description, "Open a Zen");
+        assert_eq!(b.context, "启动程序");
+        let d = entries.iter().find(|e| e.keys == "Mod+D").unwrap();
+        // 即便命令是 .sh 脚本路径，overlay-title 仍应原样作为描述。
+        assert_eq!(d.description, "WeChat");
+        let x = entries.iter().find(|e| e.keys == "Super+X").unwrap();
+        assert_eq!(x.description, "Power Menu: Toggle");
+    }
+
+    #[test]
+    fn spawn_without_overlay_title_is_meaningful() {
+        // 没有 overlay-title 时，spawn 也要尽量给出明确含义（别名 / dms 翻译 / 干净命令名）。
+        let cfg = r#"
+        binds {
+            Mod+T { spawn "kitty"; }
+            Mod+1 { spawn "dms" "ipc" "call" "audio" "increment" "3"; }
+            Mod+2 { spawn "sh" "-c" "feishu"; }
+            Mod+3 { spawn "~/.config/niri/scripts/toggle-siyuan.sh"; }
+        }
+        "#;
+        let entries = parse_sample(cfg);
+        let t = entries.iter().find(|e| e.keys == "Mod+T").unwrap();
+        assert_eq!(t.description, "启动 终端");
+        let a = entries.iter().find(|e| e.keys == "Mod+1").unwrap();
+        assert_eq!(a.description, "音量；增加");
+        let s = entries.iter().find(|e| e.keys == "Mod+2").unwrap();
+        assert_eq!(s.description, "运行：飞书");
+        let y = entries.iter().find(|e| e.keys == "Mod+3").unwrap();
+        assert_eq!(y.description, "启动 toggle-siyuan");
     }
 
     #[test]
