@@ -63,6 +63,9 @@ pub struct OverlayApp {
     redetect_until: std::time::Instant,
     /// 下一次轮询探测的计划时刻；到点后探测一次，若 app-id 变了就刷新浮层。
     next_redetect: Option<std::time::Instant>,
+
+    /// 当前主题索引（浮层内按 `c` 在 THEMES 间循环切换，并持久化到磁盘）。
+    theme_idx: usize,
 }
 
 impl OverlayApp {
@@ -93,6 +96,7 @@ impl OverlayApp {
             style_inited: false,
             key_col_w: 0.0,
             key_col_dirty: true,
+            theme_idx: crate::store::load_theme_index(),
         };
         s.regroup(entries);
         s.app_id = app_id;
@@ -338,6 +342,12 @@ impl eframe::App for OverlayApp {
                 };
                 self.scroll_offset = 0.0;
             }
+            // c：循环切换主题（配色方案），实时生效并持久化索引。
+            if ctx.input(|i| i.key_pressed(egui::Key::C)) {
+                self.theme_idx = crate::theme::normalize(self.theme_idx as isize + 1);
+                crate::theme::apply(ctx, self.theme_idx);
+                crate::store::save_theme_index(self.theme_idx);
+            }
         }
 
         // ====== CentralPanel：内容区天然占满整个窗口 ======
@@ -544,10 +554,11 @@ impl eframe::App for OverlayApp {
                         self.scroll_offset = out.state.offset.y;
 
                         ui.separator();
+                        let theme_name = crate::theme::get(self.theme_idx).name;
                         ui.label(
-                            egui::RichText::new(
-                                "jk 滚动 · f 查找 · t 切换 · 点 ☆ 收藏 · Esc 关闭",
-                            )
+                            egui::RichText::new(format!(
+                                "jk 滚动 · f 查找 · t 切换 · c 换肤[{theme_name}] · 点 ☆ 收藏 · Esc 关闭",
+                            ))
                             .weak()
                             .size(12.0),
                         );

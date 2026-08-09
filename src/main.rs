@@ -13,6 +13,7 @@ mod niri;
 mod overlay;
 mod store;
 mod term;
+mod theme;
 
 use eframe::egui::ViewportBuilder;
 use eframe::NativeOptions;
@@ -230,57 +231,9 @@ fn main() -> eframe::Result<()> {
                 Box::new(move |cc| {
                     // 注入系统中文字体：egui 内置字体不含 CJK，否则中文全是方块 ▯。
                     fonts::install_cjk(&cc.egui_ctx);
-                    // 半透明深色视觉：配合 with_transparent(true) + App::clear_color 做浮层效果。
-                    let mut visuals = eframe::egui::Visuals::dark();
-                    // ===== 科技感深蓝配色（稳重） =====
-                    // 强调色：科技蓝（用于选中、悬停边框、光标、超链接）。
-                    let accent = eframe::egui::Color32::from_rgb(82, 160, 255);
-                    // 面板：深藏蓝，近乎不透明（保证中文可读）。
-                    visuals.panel_fill =
-                        eframe::egui::Color32::from_rgba_unmultiplied(17, 22, 31, 248);
-                    visuals.window_fill = visuals.panel_fill;
-                    // 全局文本：亮蓝白；weak（窗口名/提示）与 strong（标题）由它派生，色调统一。
-                    visuals.override_text_color =
-                        Some(eframe::egui::Color32::from_rgb(222, 231, 243));
-                    // 深坑背景（输入框 / code 底色）。
-                    visuals.extreme_bg_color = eframe::egui::Color32::from_rgb(9, 12, 18);
-                    visuals.code_bg_color = eframe::egui::Color32::from_rgb(22, 29, 41);
-                    // 选中 / 光标：科技蓝。
-                    visuals.selection.bg_fill =
-                        eframe::egui::Color32::from_rgba_unmultiplied(82, 160, 255, 64);
-                    visuals.selection.stroke =
-                        eframe::egui::Stroke::new(1.0, accent);
-                    visuals.text_cursor = eframe::egui::style::TextCursorStyle {
-                        stroke: eframe::egui::Stroke::new(1.5, accent),
-                        ..Default::default()
-                    };
-                    visuals.hyperlink_color = accent;
-                    // 控件状态：深蓝分层 + 蓝灰边框，悬停/按下以科技蓝强调。
-                    use eframe::egui::Stroke;
-                    let text_main = eframe::egui::Color32::from_rgb(222, 231, 243);
-                    let text_bright = eframe::egui::Color32::from_rgb(240, 246, 255);
-                    let border = eframe::egui::Color32::from_rgb(47, 61, 82);
-                    let raised = eframe::egui::Color32::from_rgb(23, 31, 43);
-                    let hover = eframe::egui::Color32::from_rgb(29, 40, 56);
-                    let active = eframe::egui::Color32::from_rgb(35, 48, 68);
-                    let open = eframe::egui::Color32::from_rgb(24, 32, 46);
-                    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, text_main);
-                    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
-                    visuals.widgets.inactive.bg_fill = raised;
-                    visuals.widgets.inactive.fg_stroke =
-                        Stroke::new(1.0, eframe::egui::Color32::from_rgb(198, 211, 229));
-                    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border);
-                    visuals.widgets.hovered.bg_fill = hover;
-                    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, text_bright);
-                    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, accent);
-                    visuals.widgets.active.bg_fill = active;
-                    visuals.widgets.active.fg_stroke = Stroke::new(1.0, text_bright);
-                    visuals.widgets.active.bg_stroke = Stroke::new(1.0, accent);
-                    visuals.widgets.open.bg_fill = open;
-                    // 无框按钮（星号收藏）悬停时的淡蓝底。
-                    visuals.faint_bg_color =
-                        eframe::egui::Color32::from_rgba_unmultiplied(82, 160, 255, 28);
-                    cc.egui_ctx.set_visuals(visuals);
+                    // 应用主题：读取持久化的主题索引（默认 0=科技深蓝），浮层内可按 `c` 实时切换。
+                    let theme_idx = store::load_theme_index();
+                    theme::apply(&cc.egui_ctx, theme_idx);
 
                     // 启动 IPC server：监听来自后续 keytip 进程的 toggle 指令。
                     // focus_fn 动态反查 keytip 自身窗口 id 并让 niri 把它提到最前。

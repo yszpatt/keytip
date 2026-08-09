@@ -282,3 +282,29 @@ pub fn toggle_favorite(app_id: &str, entry: &ShortcutEntry) -> bool {
     save_favorites(&all);
     now_fav
 }
+
+/// 当前选中主题的索引持久化文件：`~/.config/keytip/theme.txt`
+/// （存一个十进制数字，简单可靠，便于人工查看/修改）。
+fn theme_path() -> PathBuf {
+    config_dir().join("theme.txt")
+}
+
+/// 读取持久化的主题索引；不存在/损坏时返回 0（默认=科技深蓝）。
+pub fn load_theme_index() -> usize {
+    let path = theme_path();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(n) = text.trim().parse::<isize>() {
+            return crate::theme::normalize(n);
+        }
+    }
+    0
+}
+
+/// 保存主题索引到磁盘（整体覆盖写）。
+pub fn save_theme_index(idx: usize) {
+    let path = theme_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, idx.to_string());
+}
